@@ -45,7 +45,7 @@ def generate_dataset():
         ep_begin_step_count = agent.step_count
         while not done:
             action = agent.step(x, r)
-            dh.addData(x, agent.Q_np, np.array(action), np.array(r), np.array(done),
+            dh.addData(agent.game_state[:,:,:,-1], agent.Q_np, np.array([action]), np.array([r]), np.array([done]),
                        agent.representations_np[0], agent.representations_np[1])
             x, r, done, info = env.step(action)
             score += r
