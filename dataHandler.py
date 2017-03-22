@@ -78,6 +78,288 @@ RESULTS:
 
 
 class dataHandler():
+    """
+    ##############
+    dataHandler
+    ##############
+    description:
+      Class to handle data in and out of an external hdf5 file with h5py.
+      Can be used to generate a dataset or read from an existing one.
+
+    example:
+        #test parameters
+        DB_SIZE = 10000
+        BATCH_SIZE = 100
+        BATCH_LOAD = 100
+
+
+        #datahandler object
+        dh = dataHandler()
+
+        #fake data
+        fake1=np.random.randint(255,size = [7056])
+        fake2=np.random.randint(255,size = [4,4])
+        fake3=np.random.randint(255,size = [512])
+        fake4=np.random.randint(255,size = [28,28,28])
+
+        #save loop
+        for _ in range(DB_SIZE):
+            dh.addData(fake1,fake2,fake3,fake4)
+        del fake1, fake2, fake3, fake4
+
+        #Empty the buffer and save it
+        dh.saveData()
+
+        #create random lists of batchSize
+        trainList, testList= dh.randList(BATCH_SIZE)
+
+        t = time.time()
+        #create the batch datasets
+        dh.createBatch(trainList,"training")
+        dh.createBatch(testList,"test")
+        print("batch creation time:%.3f"%(time.time()-t))
+
+        #Load from the batches
+        t = time.time()
+        for i in range(BATCH_LOAD):
+            batch1 = dh.loadBatch("training")
+        print("batch load time:{} for {} batches".format((time.time()-t),BATCH_LOAD))
+
+        #load from the raw data
+        t = time.time()
+        for i in range(BATCH_LOAD):
+            batch2 = dh.load(trainList[0])
+        print("raw load time:{} for {} batches".format((time.time()-t),BATCH_LOAD))
+        """
+
+
+    def __init__(self, fileType = "hdf5"):
+
+        if not isinstance(fileType, str):
+            print("ERROR : fileType must be a string")
+            raise
+
+        #Max index in the dataset
+        self.maxDataIndex = 0
+
+        #Size of the save slice in memory
+        self.sliceSize = SLICE_SIZE
+
+        #length of the flatten array with the data
+        self.dataLength = 0
+        self.dataShape = []
+
+        #Buffer used for single add in memory. This is to avoid to
+        #write in the hdf5 file for every new item (painfully slow)
+        self.buffer = {}
+
+        #index for batch reading
+        self.batchIndex = 0
+
+        #filetype of the datahandler (to remove)
+        self.fileType = fileType
+
+        #filename with timestamp.
+        self.fileName = str(os.getcwd()) +"\\dh_output_{}.{}".format(
+            datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S"),
+            self.fileType)
+
+
+
+
+
+    def addData(self, *data):
+        """
+        @@@@@@@@@@
+        addData
+        @@@@@@@@@@
+
+        description:
+          Add data to the dataHandler object. When the buffer is full, the
+          function will make a call to saveData to save the buffer in the
+          external hdf5 file.
+
+        args:
+          *data : all the data that will be saved in the hdf5 file. Must be
+                  numpy arrays. Can be any dimensions except 0.
+
+        returns:
+          NA
+
+        examples:
+          for _ in range(100000):
+            dh.addData(fakeData1, fakeData2, fakeData3)
+        """
+        #flatten the data to a 1D array
+        flat, shape = self.flattenData(*data)
+
+        #datatype error occured
+        if isinstance(flat, bool):
+            return
+
+        #first add to the file, note the shape of the array
+        if self.dataLength == 0:
+            self.dataLength = sum(shape)
+
+            self.dataShape = self.createIterableShape(shape)
+            self.initBuffer()
+#        else:
+            #For now if the shape is different, cancel operations
+            #Possible add to the future: create new datasets when different
+            #input sizes.
+#            if shape != self.dataShape:
+#                print("DIFFERENT DATA SHAPE: ABORT WRITE")
+#                raise
+
+
+
+        #if buffer full, save to hdf5 file
+        if self.buffIndex >= self.sliceSize:
+            self.saveData()
+            self.initBuffer()
+        #assign data to the buffer
+        self.buffer["data"][self.buffIndex] = flat
+
+        self.buffIndex += 1
+
+
+
+
+    def createBatch(self, randomList, batchType = "training"):
+        """
+        @@@@@@@@@@
+        createBatch
+        @@@@@@@@@@
+
+        description:
+          Creates batches in the dataset for fast reads. This operation
+          takes time but allows to speed up reading up to 100 times. The
+          batches will be in a group batch/train(or test).
+
+        args:
+          randomList : Random list of indexes from the original database. This
+                       list must be sliced into batches.
+          batchType : The type of the current batch, There is two options:
+                          -training
+                          -test
+
+        returns:
+          NA
+
+        examples:
+          dh = dataHandler("hdf5")
+          trainList, testList= dh.randList(100)
+
+          dh.createBatch(trainList,"training")
+          dh.createBatch(testList,"test")
+        """
+        try:
+            with h5py.File(self.fileName, "a",  libver='latest') as f:
+                #create training dataset
+                if batchType == "training":
+                    #group and attributes
+                    grp = f.create_group("batch/training")
+                    grp.attrs["batchQuantity"] = len(randomList)
+                    grp.attrs["batchSize"] = len(randomList[0])
+                    f["batch/training/list"] = randomList
+
+                    startTime = time.time()
+
+                    #Create batches
+                    for i, batchList in enumerate(randomList):
+                        grp.create_dataset(str(i),
+                                           data=self.load(batchList),
+                                           chunks=(len(batchList),
+                                                   self.dataLength),
+                                           compression="lzf",
+                                           maxshape=(len(batchList),
+                                                     self.dataLength))
+                        if i == 0:
+                            print("Creating train batch, time estimate=%.2fsec"
+                            %((time.time()-startTime)*len(randomList)))
+
+                #create test dataset
+                elif batchType == "test":
+                    print("Create test batch")
+                    grp = f.create_group("batch/test")
+                    f["batch/test/list"] = randomList
+                    grp.create_dataset("data",
+                                       data=self.load(randomList),
+                                       compression="lzf",
+                                       chunks=True,
+                                       maxshape=(len(randomList),
+                                                 self.dataLength))
+                else:
+                    raise
+        except OSError:
+                print("ERROR: File does not exists")
+                raise
+
+
+    def createIterableShape(self,shape):
+            b = []
+            for index, data in enumerate(shape):
+                if index == 0:
+                    b.append([0,data])
+                else:
+                    b.append([b[index-1][1],b[index-1][1]+data])
+            return b
+
+
+    def flattenData(self,*data):
+        """
+        @@@@@@@@@@
+        flattenData
+        @@@@@@@@@@
+
+        description:
+          Receives the data as separated elements in the function call and
+          returns the same information as a single 1D numpy array.
+
+        args:
+          *data : data to be flatten to an array.
+
+        returns:
+          dataArray : The array with the data.
+          dataShape : the shape of the new array. Can be used to indicate the
+                      separations in the new array
+
+        examples:
+          d1 = np.ones([153])
+          d2 = np.zeros([4,4])
+          d3 = np.ones([1])
+          d4 = np.zeros([1,6,6,1])
+          flat,shape = dh.flattenData(d1,d2,d3,d4)
+              #flat = flat array of 206 -> [d1,d2,d3,d4]
+              #shape = [153, 16, 1, 36]
+          flat,shape = dh.flattenData(d1,d2,d3,d4,[1,2,3])
+              #flat & shape = False: datatype not supported
+          flat,shape = dh.flattenData(d1,d2,d3,d4,(1,2,3))
+              #flat & shape = False: datatype not supported
+          flat,shape = dh.flattenData(d1,d2,d3,d4,1)
+              #flat & shape = False: datatype not supported
+        """
+        if len(data) == 0:
+            print("NO DATA")
+            return False, False
+
+        #variables to contain the flatten data and shape as a list
+        dataArray = np.zeros(0)
+        dataShape = []
+
+        try:
+            for element in data:
+                #already 1d array
+                if len(element.shape) == 1:
+                    dataArray = np.append(dataArray, element)
+                    dataShape += [element.shape[0]]
+                #reshape to a 1d array
+                else:
+                    new_shape = reduce(operator.mul,element.shape,1)
+                    dataShape += [new_shape]
+                    dataArray = np.append(dataArray,
+                                          np.reshape(element,
+                                                     new_shape))
         except AttributeError:
             print("WRONG DATA TYPE, EXPECTED NUMPY ARRAYS: CANCEL OPERATION")
             raise
