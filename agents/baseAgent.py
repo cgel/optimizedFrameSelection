@@ -87,13 +87,11 @@ class BaseAgent:
 
     def e_greedy_action(self, epsilon):
         ops = [self.Q] + self.representations
-        res = self.sess.run(ops, feed_dict={
-            self.state_ph: self.game_state})[0]
+        res= self.sess.run( ops, feed_dict={
+            self.state_ph: self.game_state})
 
         self.Q_np = res[0]
-        self.representations_np = []
-        for rep in res[1:]:
-            self.representations_np.append(rep)
+        self.representations_np = res[1:]
 
         action = np.argmax(self.Q_np)
         if np.random.uniform() < epsilon:
